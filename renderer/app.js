@@ -13,9 +13,9 @@ const notices = [
 
 const state = {
   trackIndex: 0,
-  hasSession: true,
-  playing: true,
-  progress: 72,
+  hasSession: false,
+  playing: false,
+  progress: 0,
   volume: 0.68,
   volumeBeforeMute: 0.68,
   liked: { weightless: true },
@@ -216,14 +216,6 @@ function signatureNow() {
 
 function bind() {
   const island = root.querySelector(".island");
-  island.addEventListener("pointerenter", (event) => {
-    if (event.pointerType === "mouse") state.hover = true;
-    paint(true);
-  });
-  island.addEventListener("pointerleave", (event) => {
-    if (event.pointerType === "mouse") state.hover = false;
-    paint(true);
-  });
   island.addEventListener("click", (event) => {
     const target = event.target;
     if (target.closest("button, input")) return;
@@ -353,24 +345,11 @@ function paint(force) {
     bind();
   } else updateLive();
   const island = root.querySelector(".island");
-  if (island && window.lumen) {
+  if (island && window.lumen && window.lumen.setFrame) {
     const rect = island.getBoundingClientRect();
-    const over = state.hover || state.pinned;
-    window.lumen.setInteractive(over || rect.width > 0 && state.hover);
+    window.lumen.setFrame(Math.ceil(rect.width), Math.ceil(rect.height));
   }
 }
-
-document.addEventListener("mousemove", (event) => {
-  const island = root.querySelector(".island");
-  if (!island || !window.lumen) return;
-  const rect = island.getBoundingClientRect();
-  const over =
-    event.clientX >= rect.left - 6 &&
-    event.clientX <= rect.right + 6 &&
-    event.clientY >= rect.top - 6 &&
-    event.clientY <= rect.bottom + 6;
-  window.lumen.setInteractive(over);
-});
 
 let last = performance.now();
 function tick(now) {
@@ -408,7 +387,11 @@ if (window.lumen && window.lumen.onMedia) {
     const was = state.systemLive;
     state.systemLive = Boolean(data && data.live);
     if (!state.systemLive) {
-      if (was) paint(true);
+      if (was) {
+        state.hasSession = false;
+        state.playing = false;
+        paint(true);
+      }
       return;
     }
     const nextArt = data.art || state.systemArt;
@@ -426,5 +409,14 @@ if (window.lumen && window.lumen.onMedia) {
     state.progress = Number(data.position) || 0;
     state.hasSession = true;
     if (changed) paint(true);
+  });
+}
+
+if (window.lumen && window.lumen.onHover) {
+  window.lumen.onHover((over) => {
+    if (state.hover !== over) {
+      state.hover = over;
+      paint(true);
+    }
   });
 }

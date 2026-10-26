@@ -4,48 +4,106 @@ const { spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 
-const WINDOW = { width: 980, height: 340 };
 let win = null;
 let tray = null;
 let mediaProc = null;
+let lastW = 0;
+let lastH = 0;
+let lastMedia = "";
+let lastOver = false;
+
+function sendMedia(raw) {
+  if (!win || !raw) return;
+  const text = String(raw).replace(/^\uFEFF/, "").trim();
+  if (!text.startsWith("{") || text === lastMedia) return;
+  try {
+    const data = JSON.parse(text);
+    lastMedia = text;
+    win.webContents.send("media", data);
+  } catch {
+    /* bad line */
+  }
+}
 
 function startMedia() {
   if (process.platform !== "win32") return;
+  const mediaFile = path.join(os.tmpdir(), "lumen-media.json");
+  const script = path.join(__dirname, "media.ps1");
   mediaProc = spawn(
     "powershell.exe",
-    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(__dirname, "media.ps1")],
+    ["-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", script],
     { windowsHide: true },
   );
-  let buf = "";
+  mediaProc.on("error", (err) => {
+    console.error("media spawn error", err);
+  });
+  mediaProc.stderr.on("data", (d) => {
+    console.error("media stderr", d.toString());
+  });
+  let buf = Buffer.alloc(0);
   mediaProc.stdout.on("data", (chunk) => {
-    buf += chunk.toString("utf8");
-    let nl;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (!line.startsWith("{") || !win) continue;
-      try {
-        win.webContents.send("media", JSON.parse(line));
-      } catch {
-        /* ignore a partial line */
-      }
+    buf = Buffer.concat([buf, chunk]);
+    while (true) {
+      const utf8 = buf.indexOf(10);
+      const utf16 = buf.indexOf(Buffer.from([13, 0, 10, 0]));
+      const cut = utf16 >= 0 && (utf8 < 0 || utf16 < utf8) ? utf16 : utf8;
+      if (cut < 0) break;
+      const slice = buf.subarray(0, cut);
+      const step = cut === utf16 ? 4 : 1;
+      buf = buf.subarray(cut + step);
+      const text = slice.includes(0) ? slice.toString("utf16le") : slice.toString("utf8");
+      sendMedia(text);
     }
   });
+  setInterval(() => {
+    try {
+      const raw = fs.readFileSync(mediaFile, "utf8");
+      sendMedia(raw);
+    } catch {
+      /* not written yet */
+    }
+  }, 600);
 }
 
-function position() {
+function fit(width, height) {
   if (!win) return;
-  const display = screen.getPrimaryDisplay();
-  const area = display.workArea;
-  const x = Math.round(area.x + (area.width - WINDOW.width) / 2);
-  const y = area.y + 8;
-  win.setBounds({ x, y, width: WINDOW.width, height: WINDOW.height });
+  const w = Math.max(48, Math.ceil(width) + 8);
+  const h = Math.max(32, Math.ceil(height) + 8);
+  if (w === lastW && h === lastH) return;
+  const area = screen.getPrimaryDisplay().workArea;
+  const x = Math.round(area.x + (area.width - w) / 2);
+  const y = area.y + 6;
+  win.setBounds({ x, y, width: w, height: h });
+  lastW = w;
+  lastH = h;
+}
+
+function startHoverPoll() {
+  setInterval(() => {
+    if (!win || win.isDestroyed()) return;
+    const cursor = screen.getCursorScreenPoint();
+    const b = win.getBounds();
+    const over =
+      cursor.x >= b.x &&
+      cursor.x <= b.x + b.width &&
+      cursor.y >= b.y &&
+      cursor.y <= b.y + b.height;
+    if (over !== lastOver) {
+      lastOver = over;
+      win.webContents.send("hover", over);
+      if (over) {
+        win.setIgnoreMouseEvents(false);
+      } else {
+        win.setIgnoreMouseEvents(true, { forward: true });
+      }
+    }
+  }, 80);
 }
 
 function createWindow() {
   win = new BrowserWindow({
-    width: WINDOW.width,
-    height: WINDOW.height,
+    width: 260,
+    height: 56,
     frame: false,
     transparent: true,
     resizable: false,
@@ -71,8 +129,9 @@ function createWindow() {
   win.setIgnoreMouseEvents(true, { forward: true });
   win.loadFile(path.join(__dirname, "renderer", "index.html"));
   win.once("ready-to-show", () => {
-    position();
+    win.setIgnoreMouseEvents(true, { forward: true });
     win.show();
+    startHoverPoll();
   });
   win.on("closed", () => {
     win = null;
@@ -87,7 +146,6 @@ function trayMenu() {
       click: () => {
         if (!win) createWindow();
         win.show();
-        position();
       },
     },
     {
@@ -110,10 +168,7 @@ if (!locked) {
   app.quit();
 } else {
   app.on("second-instance", () => {
-    if (win) {
-      win.show();
-      position();
-    }
+    if (win) win.show();
   });
 
   app.whenReady().then(() => {
@@ -125,10 +180,8 @@ if (!locked) {
     tray.on("click", () => {
       if (!win) createWindow();
       win.show();
-      position();
     });
     tray.on("right-click", () => tray.setContextMenu(trayMenu()));
-    screen.on("display-metrics-changed", position);
     startMedia();
   });
 }
@@ -137,10 +190,9 @@ ipcMain.on("media-cmd", (_event, payload) => {
   fs.writeFileSync(path.join(os.tmpdir(), "lumen-cmd.json"), JSON.stringify(payload || {}));
 });
 
-ipcMain.on("interactive", (_event, on) => {
-  if (!win) return;
-  if (on) win.setIgnoreMouseEvents(false);
-  else win.setIgnoreMouseEvents(true, { forward: true });
+ipcMain.on("frame", (_event, size) => {
+  if (!size) return;
+  fit(Number(size.w) || 200, Number(size.h) || 48);
 });
 
 app.on("before-quit", () => {
