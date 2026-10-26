@@ -1,0 +1,8 @@
+{
+  "name": "lumen",
+  "productName": "Lumen",
+  "version": "0.1.0",
+  "author": "Lumen",
+  "private": true,
+  "main": "main.js"
+}
